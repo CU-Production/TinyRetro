@@ -657,10 +657,8 @@ void tickAPU(NES* nes, APU* apu) {
 		output[1] = output[0] = tnd_tbl[(3 * tri_output) + (2 * noise_out) + dOut] + pulse_tbl[p1_output + p2_output];
 
 //		if (Pa_GetStreamWriteAvailable(apu->stream)) Pa_WriteStream(apu->stream, output, 1);
-        apu->streamMutex.lock();
         apu->stream.push_back(output[0]);
 //        apu->stream.push_back(output[1]); only mono, copy to stereo in sound callback
-        apu->streamMutex.unlock();
 	}
 }
 

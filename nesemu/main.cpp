@@ -83,21 +83,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         static MSG message = { 0 };
         while(PeekMessage(&message, NULL, 0, 0, PM_REMOVE)) { DispatchMessage(&message); }
 
-        // GetAsyncKeyState & 0x8000 keydown
-        // GetAsyncKeyState & 0b1    keypress
-        for (int i = 0; i < 256; i++) {
-            if ((GetAsyncKeyState(i) & 0x8000) || (GetAsyncKeyState(i) & 0b1)) {
-                controller1 |= (i == 'z' || i == 'Z');       // A
-                controller1 |= (i == 'x' || i == 'X') << 1;  // B
-                controller1 |= (i == VK_BACK)         << 2;  // Select
-                controller1 |= (i == VK_RETURN)       << 3;  // Start
-                controller1 |= (i == VK_UP)           << 4;
-                controller1 |= (i == VK_DOWN)         << 5;
-                controller1 |= (i == VK_LEFT)         << 6;
-                controller1 |= (i == VK_RIGHT)        << 7;
-            }
-        }
-
         // processe input
         nes->controller1->buttons = controller1;
         nes->controller2->buttons = 0;

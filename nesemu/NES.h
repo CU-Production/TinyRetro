@@ -82,7 +82,6 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
-#include <mutex>
 
 //#include <portaudio.h>
 
@@ -226,7 +225,6 @@ struct Noise {
 struct APU {
 //	PaStream* stream;
     std::vector<float> stream;
-    std::mutex streamMutex;
 	Pulse pulse1;
 	Pulse pulse2;
 	Triangle triangle;
