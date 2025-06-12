@@ -106,6 +106,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         emulate(nes, dt);
 
         memcpy(frame.pixels, nes->ppu->front, sizeof(uint32_t) * nes_width * nes_height);
+        for (int i = 0; i < nes_width * nes_height; i++) {
+            uint32_t c = nes->ppu->front[i];
+            uint8_t b = static_cast<uint8_t>(c >> 16U);
+            uint8_t g = static_cast<uint8_t>(c >> 8U);
+            uint8_t r = static_cast<uint8_t>(c);
+            frame.pixels[i] = (r << 16U) | (g << 8U) | b;
+        }
 
         nes->apu->stream.clear();
 
