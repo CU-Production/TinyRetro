@@ -1,6 +1,5 @@
 #define UNICODE
 #define _UNICODE
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -64,9 +63,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
 
     char* ROM_path;
     if (__argc < 2) {
-        MessageBox(window_handle, L"Please pass ROM path as first parameter.", L"Error", MB_OK);
-        std::cerr << "Please pass ROM path as first parameter.\n";
-        // return EXIT_FAILURE;
+        OPENFILENAME ofn;
+        TCHAR szFile[260] = {0};
+
+        ZeroMemory(&ofn, sizeof(ofn));
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = NULL; // Set owner window if needed
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = sizeof(szFile);
+        ofn.lpstrFilter = L"NES rom(*.nes)\0*.nes\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+
+        if (GetOpenFileName(&ofn) == TRUE) {
+            ROM_path = (char*)malloc(sizeof(szFile));
+            wcstombs(ROM_path, szFile, sizeof(szFile));
+        } else {
+            printf("File selection cancelled.\n");
+            return 0;
+        }
     } else {
         ROM_path = __argv[1];
     }
