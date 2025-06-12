@@ -1,0 +1,1 @@
+add_executable(TinyNES WIN32 main.cpp cpu.cpp memory.cpp NES.cpp)
