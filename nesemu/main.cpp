@@ -4,6 +4,9 @@
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <xaudio2.h>
+
+#pragma comment(lib, "xaudio2")
 
 #include "NES.h"
 
@@ -26,7 +29,18 @@ static BITMAPINFO frame_bitmap_info;
 static HBITMAP frame_bitmap = 0;
 static HDC frame_device_context = 0;
 
+IXAudio2* m_xAudio2;
+IXAudio2MasteringVoice* m_masterVoice;
+
+std::vector<float> tmp_audio_data;
+XAUDIO2_BUFFER m_audioBuffer;
+IXAudio2SourceVoice* m_sourceVoice;
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, int nCmdShow) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    XAudio2Create(&m_xAudio2, 0, XAUDIO2_USE_DEFAULT_PROCESSOR);
+    m_xAudio2->CreateMasteringVoice(&m_masterVoice);
+
     const wchar_t window_class_name[] = L"TinyRetro_Nesemu";
     static WNDCLASS window_class = { 0 };
     window_class.lpfnWndProc = WindowProcessMessage;
@@ -66,7 +80,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
     if (!nes->initialized) return EXIT_FAILURE;
 
 
-
     double dt = 0;
 
     FILETIME ft;
@@ -90,7 +103,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         // step the NES state forward by 'dt' seconds, or more if in fast-forward
         emulate(nes, dt);
 
-        memcpy(frame.pixels, nes->ppu->front, sizeof(uint32_t) * nes_width * nes_height);
+        // display video
         for (int i = 0; i < nes_width * nes_height; i++) {
             uint32_t c = nes->ppu->front[i];
             uint8_t b = static_cast<uint8_t>(c >> 16U);
@@ -99,7 +112,49 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
             frame.pixels[i] = (r << 16U) | (g << 8U) | b;
         }
 
-        nes->apu->stream.clear();
+        // render audio at 1 fps
+        static int audio_tick = 0;
+        if (audio_tick % 60 == 0)
+        {
+            if (m_sourceVoice) {
+                m_sourceVoice->DestroyVoice();
+                m_sourceVoice = nullptr;
+            }
+
+            WAVEFORMATEX waveFormat;
+
+            // Set the wave format for the buffer.
+            waveFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+            waveFormat.nSamplesPerSec = 44100;
+            waveFormat.wBitsPerSample = 32;
+            waveFormat.nChannels = 1;
+            waveFormat.nBlockAlign = (waveFormat.wBitsPerSample / 8) * waveFormat.nChannels;
+            waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
+            waveFormat.cbSize = 0;
+
+            // Fill in the audio buffer struct.
+            tmp_audio_data = nes->apu->stream;
+            nes->apu->stream.clear();
+            m_audioBuffer.AudioBytes = tmp_audio_data.size() * sizeof(float);          // Size of the audio buffer in bytes.
+            m_audioBuffer.pAudioData = (BYTE*)(tmp_audio_data.data());        // Buffer containing audio data.
+            m_audioBuffer.Flags = XAUDIO2_END_OF_STREAM;  // Tell the source voice not to expect any data after this buffer.
+            m_audioBuffer.LoopCount = 0;                  // Not looping.  Change to XAUDIO2_LOOP_INFINITE for looping.
+            m_audioBuffer.PlayBegin = 0;
+            m_audioBuffer.PlayLength = 0;
+            m_audioBuffer.LoopBegin = 0;
+            m_audioBuffer.LoopLength = 0;
+            m_audioBuffer.pContext = NULL;
+
+            HRESULT result = m_xAudio2->CreateSourceVoice(&m_sourceVoice, &waveFormat, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
+            if (FAILED(result)) {}
+            else {
+                m_sourceVoice->SubmitSourceBuffer(&m_audioBuffer);
+                m_sourceVoice->SetVolume(1.0f);
+                m_sourceVoice->Start(0, XAUDIO2_COMMIT_NOW);
+
+            }
+        }
+        audio_tick++;
 
         InvalidateRect(window_handle, NULL, FALSE);
         UpdateWindow(window_handle);
@@ -108,6 +163,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         if (time_to_16ms > 0)
             Sleep(static_cast<int>(time_to_16ms * 1000));// NOLINT magic numbers
     }
+
+    if (m_sourceVoice) m_sourceVoice->DestroyVoice();
+    m_masterVoice->DestroyVoice();
+    m_xAudio2->Release();
+    CoUninitialize();
 
     return 0;
 }
