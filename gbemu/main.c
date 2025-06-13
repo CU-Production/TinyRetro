@@ -122,7 +122,8 @@ static HDC frame_device_context = 0;
 IXAudio2* m_xAudio2;
 IXAudio2MasteringVoice* m_masterVoice;
 
-audio_sample_t tmp_apu_buffer[AUDIO_SAMPLES_TOTAL];
+uint32_t tmp_audio_pos = 0;
+audio_sample_t tmp_apu_buffer[60 * AUDIO_SAMPLES_TOTAL];
 XAUDIO2_BUFFER m_audioBuffer;
 IXAudio2SourceVoice* m_sourceVoice;
 
@@ -257,7 +258,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
             waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
             waveFormat.cbSize = 0;
 
-            m_audioBuffer.AudioBytes = AUDIO_SAMPLES_TOTAL * sizeof(uint16_t);
+            m_audioBuffer.AudioBytes = AUDIO_SAMPLES_TOTAL * sizeof(uint16_t) * 60;
             m_audioBuffer.pAudioData = (BYTE*)tmp_apu_buffer;
 
             HRESULT result = IXAudio2_CreateSourceVoice(m_xAudio2, &m_sourceVoice, &waveFormat, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
@@ -270,12 +271,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
             }
 
             start_audio = true;
-        } else {
+        }
+
+        // Fill in the audio buffer struct.
+        minigb_apu_audio_callback(&apu, tmp_apu_buffer + tmp_audio_pos * AUDIO_SAMPLES_TOTAL);
+        tmp_audio_pos++;
+
+        if (tmp_audio_pos == 60) {
             IXAudio2SourceVoice_Stop(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
-            // Fill in the audio buffer struct.
-            minigb_apu_audio_callback(&apu, tmp_apu_buffer);
             IXAudio2SourceVoice_SubmitSourceBuffer(m_sourceVoice, &m_audioBuffer, NULL);
             IXAudio2SourceVoice_Start(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
+            tmp_audio_pos = 0;
         }
 
         InvalidateRect(window_handle, NULL, FALSE);
