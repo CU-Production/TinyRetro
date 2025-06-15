@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
+#define AUDIO_LATENCY 6
 #include <xaudio2.h>
 
 #pragma comment(lib, "xaudio2")
@@ -129,7 +130,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
 
         // render audio at 1 fps
         static int audio_tick = 0;
-        if (audio_tick % 60 == 0)
+        if (audio_tick % AUDIO_LATENCY == 0)
         {
             if (m_sourceVoice) {
                 m_sourceVoice->DestroyVoice();

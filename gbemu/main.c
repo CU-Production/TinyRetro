@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
+#define AUDIO_LATENCY 15
 #include <xaudio2.h>
 #include <stdio.h>
 
@@ -123,7 +124,7 @@ IXAudio2* m_xAudio2;
 IXAudio2MasteringVoice* m_masterVoice;
 
 uint32_t tmp_audio_pos = 0;
-audio_sample_t tmp_apu_buffer[60 * AUDIO_SAMPLES_TOTAL];
+audio_sample_t tmp_apu_buffer[AUDIO_LATENCY * AUDIO_SAMPLES_TOTAL];
 XAUDIO2_BUFFER m_audioBuffer;
 IXAudio2SourceVoice* m_sourceVoice;
 
@@ -258,15 +259,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
             waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
             waveFormat.cbSize = 0;
 
-            m_audioBuffer.AudioBytes = AUDIO_SAMPLES_TOTAL * sizeof(uint16_t) * 60;
+            m_audioBuffer.AudioBytes = AUDIO_SAMPLES_TOTAL * sizeof(uint16_t) * AUDIO_LATENCY;
             m_audioBuffer.pAudioData = (BYTE*)tmp_apu_buffer;
 
             HRESULT result = IXAudio2_CreateSourceVoice(m_xAudio2, &m_sourceVoice, &waveFormat, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
             if (FAILED(result)) {}
             else {
                 IXAudio2SourceVoice_SubmitSourceBuffer(m_sourceVoice, &m_audioBuffer, NULL);
-                IXAudio2SourceVoice_SetVolume(m_sourceVoice, 1.0f, NULL);
-                IXAudio2SourceVoice_SetFrequencyRatio(m_sourceVoice, 1.0f, NULL);
+                IXAudio2SourceVoice_SetVolume(m_sourceVoice, 1.0f, 0);
+                IXAudio2SourceVoice_SetFrequencyRatio(m_sourceVoice, 1.0f, 0);
                 IXAudio2SourceVoice_Start(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
             }
 
@@ -277,7 +278,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         minigb_apu_audio_callback(&apu, tmp_apu_buffer + tmp_audio_pos * AUDIO_SAMPLES_TOTAL);
         tmp_audio_pos++;
 
-        if (tmp_audio_pos == 60) {
+        if (tmp_audio_pos == AUDIO_LATENCY) {
             IXAudio2SourceVoice_Stop(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
             IXAudio2SourceVoice_SubmitSourceBuffer(m_sourceVoice, &m_audioBuffer, NULL);
             IXAudio2SourceVoice_Start(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
