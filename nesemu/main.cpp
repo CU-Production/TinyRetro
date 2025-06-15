@@ -3,10 +3,12 @@
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
-#define AUDIO_LATENCY 6
+#define AUDIO_LATENCY 20
 #include <xaudio2.h>
+#include <xinput.h>
 
 #pragma comment(lib, "xaudio2")
+#pragma comment(lib, "xinput")
 
 #include "NES.h"
 
@@ -35,6 +37,9 @@ IXAudio2MasteringVoice* m_masterVoice;
 std::vector<float> tmp_audio_data;
 XAUDIO2_BUFFER m_audioBuffer;
 IXAudio2SourceVoice* m_sourceVoice;
+
+XINPUT_STATE controllerState;
+bool controllerActive;
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -95,6 +100,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
     NES* nes = new NES(ROM_path, SRAM_path);
     if (!nes->initialized) return EXIT_FAILURE;
 
+    controllerActive = false;
+
 
     double dt = 0;
 
@@ -112,7 +119,53 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         static MSG message = { 0 };
         while(PeekMessage(&message, NULL, 0, 0, PM_REMOVE)) { DispatchMessage(&message); }
 
-        // processe input
+        // process xinput
+        ZeroMemory(&controllerState, sizeof(XINPUT_STATE));
+
+        // Get the state of the controller.
+        DWORD result = XInputGetState(0, &controllerState);
+
+        // Store whether the controller is currently connected or not.
+        if(result == ERROR_SUCCESS) {
+            controllerActive = true;
+        } else {
+            controllerActive = false;
+        }
+
+        if (controllerActive) {
+            bool buttonZ = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_A;
+            bool buttonX = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_B;
+            bool buttonDUP = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP;
+            bool buttonDDOWN = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
+            bool buttonDLEFT = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
+            bool buttonDRIGHT = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
+            bool buttonSelect = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_BACK;
+            bool buttonStart = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_START;
+
+            int thumbLeftX = (int)controllerState.Gamepad.sThumbLX;
+            int thumbLeftY = (int)controllerState.Gamepad.sThumbLY;
+            int magnitude = (int)sqrt((thumbLeftX * thumbLeftX) + (thumbLeftY * thumbLeftY));
+            if(magnitude < XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) {
+                thumbLeftX = 0;
+                thumbLeftY = 0;
+            }
+            if (thumbLeftX < -1000) buttonDLEFT = true;
+            if (thumbLeftX >  1000) buttonDRIGHT = true;
+            if (thumbLeftY >  1000) buttonDUP = true;
+            if (thumbLeftY < -1000) buttonDDOWN = true;
+
+            controller1 = 0;
+            if (buttonZ)      controller1 |= 0b00000001;
+            if (buttonX)      controller1 |= 0b00000010;
+            if (buttonSelect) controller1 |= 0b00000100;
+            if (buttonStart)  controller1 |= 0b00001000;
+            if (buttonDUP)    controller1 |= 0b00010000;
+            if (buttonDDOWN)  controller1 |= 0b00100000;
+            if (buttonDLEFT)  controller1 |= 0b01000000;
+            if (buttonDRIGHT) controller1 |= 0b10000000;
+        }
+
+        // process input
         nes->controller1->buttons = controller1;
         nes->controller2->buttons = 0;
 
