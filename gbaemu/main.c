@@ -10,6 +10,9 @@
 
 #define UNICODE
 #define _UNICODE
+#ifndef COBJMACROS
+#define COBJMACROS
+#endif
 #include <audiosessiontypes.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -105,13 +108,13 @@ static DWORD WINAPI audioThreadProc(LPVOID lpParam) {
         
         if (quit) break;
         
-        hr = audioClient->lpVtbl->GetCurrentPadding(audioClient, &paddingFrames);
+        hr = IAudioClient_GetCurrentPadding(audioClient, &paddingFrames);
         if (FAILED(hr)) continue;
         
         availableFrames = bufferFrameCount - paddingFrames;
         
         if (availableFrames > 0) {
-            hr = renderClient->lpVtbl->GetBuffer(renderClient, availableFrames, &data);
+            hr = IAudioRenderClient_GetBuffer(renderClient, availableFrames, &data);
             if (SUCCEEDED(hr)) {
                 EnterCriticalSection(&audioLock);
                 
@@ -145,7 +148,7 @@ static DWORD WINAPI audioThreadProc(LPVOID lpParam) {
                 
                 LeaveCriticalSection(&audioLock);
                 
-                hr = renderClient->lpVtbl->ReleaseBuffer(renderClient, availableFrames, 0);
+                hr = IAudioRenderClient_ReleaseBuffer(renderClient, availableFrames, 0);
             }
         }
     }
@@ -208,14 +211,14 @@ static bool initializeAudio(void) {
     }
     
     // Get default audio endpoint
-    hr = deviceEnumerator->lpVtbl->GetDefaultAudioEndpoint(deviceEnumerator, eRender, eConsole, &device);
+    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(deviceEnumerator, eRender, eConsole, &device);
     if (FAILED(hr)) {
         printf("Failed to get default audio endpoint: 0x%08x\n", hr);
         return false;
     }
     
     // Create audio client
-    hr = device->lpVtbl->Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&audioClient);
+    hr = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&audioClient);
     if (FAILED(hr)) {
         printf("Failed to activate audio client: 0x%08x\n", hr);
         return false;
@@ -240,7 +243,7 @@ static bool initializeAudio(void) {
     waveFormat.SubFormat = SOUNDIO_KSDATAFORMAT_SUBTYPE_PCM;
     
     // Initialize audio client
-    hr = audioClient->lpVtbl->Initialize(audioClient, AUDCLNT_SHAREMODE_SHARED,
+    hr = IAudioClient_Initialize(audioClient, AUDCLNT_SHAREMODE_SHARED,
                                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK|AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM|AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                                 AUDIO_BUFFER_DURATION_MS * 10000, // Convert ms to 100ns units
                                 0, (WAVEFORMATEX*)&waveFormat, NULL);
@@ -250,7 +253,7 @@ static bool initializeAudio(void) {
     }
     
     // Get buffer size
-    hr = audioClient->lpVtbl->GetBufferSize(audioClient, &bufferFrameCount);
+    hr = IAudioClient_GetBufferSize(audioClient, &bufferFrameCount);
     if (FAILED(hr)) {
         printf("Failed to get buffer size: 0x%08x\n", hr);
         return false;
@@ -264,14 +267,14 @@ static bool initializeAudio(void) {
     }
     
     // Set event handle
-    hr = audioClient->lpVtbl->SetEventHandle(audioClient, audioEvent);
+    hr = IAudioClient_SetEventHandle(audioClient, audioEvent);
     if (FAILED(hr)) {
         printf("Failed to set event handle: 0x%08x\n", hr);
         return false;
     }
     
     // Get render client
-    hr = audioClient->lpVtbl->GetService(audioClient, &IID_IAudioRenderClient, (void**)&renderClient);
+    hr = IAudioClient_GetService(audioClient, &IID_IAudioRenderClient, (void**)&renderClient);
     if (FAILED(hr)) {
         printf("Failed to get render client: 0x%08x\n", hr);
         return false;
@@ -296,7 +299,7 @@ static bool initializeAudio(void) {
     }
     
     // Start audio client
-    hr = audioClient->lpVtbl->Start(audioClient);
+    hr = IAudioClient_Start(audioClient);
     if (FAILED(hr)) {
         printf("Failed to start audio client: 0x%08x\n", hr);
         return false;
@@ -322,23 +325,23 @@ static void cleanupAudio(void) {
     }
     
     if (audioClient) {
-        audioClient->lpVtbl->Stop(audioClient);
-        audioClient->lpVtbl->Release(audioClient);
+        IAudioClient_Stop(audioClient);
+        IAudioClient_Release(audioClient);
         audioClient = NULL;
     }
     
     if (renderClient) {
-        renderClient->lpVtbl->Release(renderClient);
+        IAudioRenderClient_Release(renderClient);
         renderClient = NULL;
     }
     
     if (device) {
-        device->lpVtbl->Release(device);
+        IMMDevice_Release(device);
         device = NULL;
     }
     
     if (deviceEnumerator) {
-        deviceEnumerator->lpVtbl->Release(deviceEnumerator);
+        IMMDeviceEnumerator_Release(deviceEnumerator);
         deviceEnumerator = NULL;
     }
     
