@@ -42,8 +42,8 @@ const static GUID SOUNDIO_KSDATAFORMAT_SUBTYPE_PCM        = { 0x00000001,0x0000,
 #define AUDIO_SAMPLE_RATE 32768
 #define AUDIO_CHANNELS 2
 #define AUDIO_BITS_PER_SAMPLE 16
-#define AUDIO_BUFFER_DURATION_MS 20
-#define SAMPLES_PER_FRAME 1024
+#define AUDIO_BUFFER_DURATION_MS 30  // Increased buffer size for smoother audio
+#define SAMPLES_PER_FRAME 512        // Reduced for more frequent updates
 
 unsigned width, height;
 struct mCoreThread m_thread;
@@ -117,16 +117,29 @@ static DWORD WINAPI audioThreadProc(LPVOID lpParam) {
                 
                 // Copy samples from our ring buffer to WASAPI buffer
                 int16_t* output = (int16_t*)data;
+                static int16_t lastLeft = 0, lastRight = 0; // For smooth interpolation
+                
                 for (UINT32 i = 0; i < availableFrames * 2; i += 2) {
                     if (ringReadPos != ringWritePos) {
                         size_t readIndex = (ringReadPos * 2) % ringBufferSize;
-                        output[i] = audioRingBuffer[readIndex];     // Left
-                        output[i + 1] = audioRingBuffer[readIndex + 1]; // Right
+                        int16_t currentLeft = audioRingBuffer[readIndex];
+                        int16_t currentRight = audioRingBuffer[readIndex + 1];
+                        
+                        // Simple interpolation for smoother audio
+                        output[i] = (currentLeft + lastLeft) / 2;     // Left
+                        output[i + 1] = (currentRight + lastRight) / 2; // Right
+                        
+                        lastLeft = currentLeft;
+                        lastRight = currentRight;
+                        
                         ringReadPos = (ringReadPos + 1) % (ringBufferSize / 2);
                     } else {
-                        // Buffer underrun - output silence
-                        output[i] = 0;
-                        output[i + 1] = 0;
+                        // Buffer underrun - use last known values for smooth transition
+                        output[i] = lastLeft / 2;     // Fade out gradually
+                        output[i + 1] = lastRight / 2;
+                        
+                        lastLeft = lastLeft * 3 / 4;  // Gradual fade
+                        lastRight = lastRight * 3 / 4;
                     }
                 }
                 
@@ -147,12 +160,33 @@ static void processAudioSamples(int16_t* samples, size_t nSamples) {
     
     EnterCriticalSection(&audioLock);
     
-    // Copy stereo samples to ring buffer
+    // Copy stereo samples to ring buffer with overflow protection
     for (size_t i = 0; i < nSamples; i++) {
         size_t writeIndex = (ringWritePos * 2) % ringBufferSize;
-        audioRingBuffer[writeIndex] = samples[i * 2];       // Left
-        audioRingBuffer[writeIndex + 1] = samples[i * 2 + 1]; // Right
-        ringWritePos = (ringWritePos + 1) % (ringBufferSize / 2);
+        size_t nextWritePos = (ringWritePos + 1) % (ringBufferSize / 2);
+        
+        // Check for buffer overflow - if so, skip oldest sample
+        if (nextWritePos == ringReadPos) {
+            // Buffer is full, advance read position to make room
+            ringReadPos = (ringReadPos + 1) % (ringBufferSize / 2);
+        }
+        
+        // Apply simple anti-aliasing filter to reduce noise
+        static int16_t prevLeft = 0, prevRight = 0;
+        int16_t currentLeft = samples[i * 2];
+        int16_t currentRight = samples[i * 2 + 1];
+        
+        // Simple low-pass filter (50% current + 50% previous)
+        int16_t filteredLeft = (currentLeft + prevLeft) / 2;
+        int16_t filteredRight = (currentRight + prevRight) / 2;
+        
+        audioRingBuffer[writeIndex] = filteredLeft;
+        audioRingBuffer[writeIndex + 1] = filteredRight;
+        
+        prevLeft = currentLeft;
+        prevRight = currentRight;
+        
+        ringWritePos = nextWritePos;
     }
     
     LeaveCriticalSection(&audioLock);
@@ -435,11 +469,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
             int16_t mgbaAudioSamples[SAMPLES_PER_FRAME * 2] = {0}; // Stereo buffer
             
             /*
-             * SIMPLIFIED mGBA AUDIO INTEGRATION
+             * OPTIMIZED mGBA AUDIO INTEGRATION
              * 
              * ✅ WASAPI audio system is fully functional
              * ✅ Direct audio reading from mGBA blip_t buffers
-             * ✅ No threading conflicts - simple and stable
+             * ✅ Noise reduction and audio smoothing
              */
             
             // Get mGBA audio channels (blip_t buffers)
@@ -461,6 +495,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
                 
                 // Check how many samples are available
                 int available = blip_samples_avail(left);
+                int rightAvailable = blip_samples_avail(right);
+                
+                // Use the minimum available samples to avoid desync
+                if (rightAvailable < available) {
+                    available = rightAvailable;
+                }
+                
                 if (available > SAMPLES_PER_FRAME) {
                     available = SAMPLES_PER_FRAME;
                 }
@@ -470,31 +511,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
                     blip_read_samples(left, mgbaAudioSamples, available, 2); // Left into even indices
                     blip_read_samples(right, mgbaAudioSamples + 1, available, 2); // Right into odd indices
                     
+                    // Apply simple volume normalization to reduce clipping noise
+                    static const float volumeScale = 0.5f; // Reduce volume slightly to prevent clipping
+                    for (int i = 0; i < available * 2; i++) {
+                        mgbaAudioSamples[i] = (int16_t)(mgbaAudioSamples[i] * volumeScale);
+                    }
+                    
                     gotRealAudio = true;
                     
-                    // Fill remaining buffer with silence if needed
+                    // Fill remaining buffer with silence to prevent noise
                     if (available < SAMPLES_PER_FRAME) {
                         memset(&mgbaAudioSamples[available * 2], 0, 
                                (SAMPLES_PER_FRAME - available) * 2 * sizeof(int16_t));
                     }
+                } else {
+                    // If no samples available, output silence to prevent noise
+                    memset(mgbaAudioSamples, 0, SAMPLES_PER_FRAME * 2 * sizeof(int16_t));
+                    gotRealAudio = true; // Don't fall back to test tone
                 }
             }
             
-            // Fallback to test audio if mGBA audio isn't ready yet
+            // Only use test audio if mGBA audio channels aren't available at all
             if (!gotRealAudio) {
-                static uint32_t frameCounter = 0;
-                frameCounter++;
+                // Output silence instead of test tone to reduce noise
+                memset(mgbaAudioSamples, 0, SAMPLES_PER_FRAME * 2 * sizeof(int16_t));
                 
-                // Generate a very quiet test tone
-                for (size_t i = 0; i < SAMPLES_PER_FRAME; i++) {
-                    double time = (double)(frameCounter * SAMPLES_PER_FRAME + i) / AUDIO_SAMPLE_RATE;
-                    double baseFreq = 440.0;
-                    double amplitude = 100.0; // Very quiet
+                // Optional: very quiet test tone only for debugging
+                static bool enableTestTone = false; // Set to true for debugging
+                if (enableTestTone) {
+                    static uint32_t frameCounter = 0;
+                    frameCounter++;
                     
-                    int16_t sample = (int16_t)(amplitude * sin(2.0 * 3.14159265359 * baseFreq * time));
-                    
-                    mgbaAudioSamples[i * 2] = sample;     // Left channel
-                    mgbaAudioSamples[i * 2 + 1] = sample; // Right channel
+                    for (size_t i = 0; i < SAMPLES_PER_FRAME; i++) {
+                        double time = (double)(frameCounter * SAMPLES_PER_FRAME + i) / AUDIO_SAMPLE_RATE;
+                        double baseFreq = 440.0;
+                        double amplitude = 50.0; // Very quiet
+                        
+                        int16_t sample = (int16_t)(amplitude * sin(2.0 * 3.14159265359 * baseFreq * time));
+                        
+                        mgbaAudioSamples[i * 2] = sample;     // Left channel
+                        mgbaAudioSamples[i * 2 + 1] = sample; // Right channel
+                    }
                 }
             }
             
