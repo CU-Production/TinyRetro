@@ -13,21 +13,39 @@
 #define UNICODE
 #define _UNICODE
 #include <audiosessiontypes.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 
-#define AUDIO_LATENCY 20
-#include <xaudio2.h>
 #include <xinput.h>
 
-#pragma comment(lib, "xaudio2")
 #pragma comment(lib, "xinput")
+#pragma comment(lib, "kernel32")
+#pragma comment(lib, "ole32")
 
 #define TINYGBA_BINDING_KEY 0x22334455
 #define LCD_WIDTH  240
 #define LCD_HEIGHT 160
+
+static const CLSID CLSID_MMDeviceEnumerator  = { 0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e} };
+static const IID IID_IMMDeviceEnumerator     = { 0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6} };
+static const IID IID_IAudioClient            = { 0x1cb9ad4c, 0xdbfa, 0x4c32, {0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2} };
+static const IID IID_IAudioRenderClient      = { 0xf294acfc, 0x3146, 0x4483, {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2} };
+
+const static GUID SOUNDIO_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = { 0x00000003,0x0000,0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+const static GUID SOUNDIO_KSDATAFORMAT_SUBTYPE_PCM        = { 0x00000001,0x0000,0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+
+// Audio constants
+#define AUDIO_SAMPLE_RATE 32768
+#define AUDIO_CHANNELS 2
+#define AUDIO_BITS_PER_SAMPLE 16
+#define AUDIO_BUFFER_DURATION_MS 20
+#define SAMPLES_PER_FRAME 1024
 
 unsigned width, height;
 struct mCoreThread m_thread;
@@ -56,17 +74,259 @@ static BITMAPINFO frame_bitmap_info;
 static HBITMAP frame_bitmap = 0;
 static HDC frame_device_context = 0;
 
-IXAudio2* m_xAudio2;
-IXAudio2MasteringVoice* m_masterVoice;
+// WASAPI Audio variables
+static IMMDeviceEnumerator* deviceEnumerator = NULL;
+static IMMDevice* device = NULL;
+static IAudioClient* audioClient = NULL;
+static IAudioRenderClient* renderClient = NULL;
+static HANDLE audioEvent = NULL;
+static HANDLE audioThread = NULL;
+static UINT32 bufferFrameCount = 0;
+static bool audioInitialized = false;
+static int16_t* audioBuffer = NULL;
+static size_t audioBufferSize = 0;
+static volatile size_t audioWritePos = 0;
+static volatile size_t audioReadPos = 0;
+static CRITICAL_SECTION audioLock;
 
-XAUDIO2_BUFFER m_audioBuffer;
-IXAudio2SourceVoice* m_sourceVoice;
+// Audio ring buffer for mGBA audio data
+static int16_t* audioRingBuffer = NULL;
+static size_t ringBufferSize = 0;
+static volatile size_t ringWritePos = 0;
+static volatile size_t ringReadPos = 0;
+
+// WASAPI audio thread
+static DWORD WINAPI audioThreadProc(LPVOID lpParam) {
+    HRESULT hr;
+    UINT32 paddingFrames, availableFrames;
+    BYTE* data;
+    
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    
+    while (!quit) {
+        WaitForSingleObject(audioEvent, INFINITE);
+        
+        if (quit) break;
+        
+        hr = audioClient->lpVtbl->GetCurrentPadding(audioClient, &paddingFrames);
+        if (FAILED(hr)) continue;
+        
+        availableFrames = bufferFrameCount - paddingFrames;
+        
+        if (availableFrames > 0) {
+            hr = renderClient->lpVtbl->GetBuffer(renderClient, availableFrames, &data);
+            if (SUCCEEDED(hr)) {
+                EnterCriticalSection(&audioLock);
+                
+                // Copy samples from our ring buffer to WASAPI buffer
+                int16_t* output = (int16_t*)data;
+                for (UINT32 i = 0; i < availableFrames * 2; i += 2) {
+                    if (ringReadPos != ringWritePos) {
+                        size_t readIndex = (ringReadPos * 2) % ringBufferSize;
+                        output[i] = audioRingBuffer[readIndex];     // Left
+                        output[i + 1] = audioRingBuffer[readIndex + 1]; // Right
+                        ringReadPos = (ringReadPos + 1) % (ringBufferSize / 2);
+                    } else {
+                        // Buffer underrun - output silence
+                        output[i] = 0;
+                        output[i + 1] = 0;
+                    }
+                }
+                
+                LeaveCriticalSection(&audioLock);
+                
+                hr = renderClient->lpVtbl->ReleaseBuffer(renderClient, availableFrames, 0);
+            }
+        }
+    }
+    
+    CoUninitialize();
+    return 0;
+}
+
+// Audio callback function to be called when mGBA has audio data
+static void processAudioSamples(int16_t* samples, size_t nSamples) {
+    if (!audioInitialized || !audioRingBuffer) return;
+    
+    EnterCriticalSection(&audioLock);
+    
+    // Copy stereo samples to ring buffer
+    for (size_t i = 0; i < nSamples; i++) {
+        size_t writeIndex = (ringWritePos * 2) % ringBufferSize;
+        audioRingBuffer[writeIndex] = samples[i * 2];       // Left
+        audioRingBuffer[writeIndex + 1] = samples[i * 2 + 1]; // Right
+        ringWritePos = (ringWritePos + 1) % (ringBufferSize / 2);
+    }
+    
+    LeaveCriticalSection(&audioLock);
+}
+
+// Initialize WASAPI audio
+static bool initializeAudio(void) {
+    HRESULT hr;
+    WAVEFORMATEXTENSIBLE waveFormat = {0};
+    
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    
+    // Create device enumerator
+    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+                         &IID_IMMDeviceEnumerator, (void**)&deviceEnumerator);
+    if (FAILED(hr)) {
+        printf("Failed to create device enumerator: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Get default audio endpoint
+    hr = deviceEnumerator->lpVtbl->GetDefaultAudioEndpoint(deviceEnumerator, eRender, eConsole, &device);
+    if (FAILED(hr)) {
+        printf("Failed to get default audio endpoint: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Create audio client
+    hr = device->lpVtbl->Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&audioClient);
+    if (FAILED(hr)) {
+        printf("Failed to activate audio client: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Set up wave format
+    // waveFormat.Format.wFormatTag = WAVE_FORMAT_PCM;
+    waveFormat.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    waveFormat.Format.nChannels = AUDIO_CHANNELS;
+    waveFormat.Format.nSamplesPerSec = AUDIO_SAMPLE_RATE;
+    waveFormat.Format.wBitsPerSample = AUDIO_BITS_PER_SAMPLE;
+    waveFormat.Format.nBlockAlign = (waveFormat.Format.wBitsPerSample / 8) * waveFormat.Format.nChannels;
+    waveFormat.Format.nAvgBytesPerSec = waveFormat.Format.nSamplesPerSec * waveFormat.Format.nBlockAlign;
+    waveFormat.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    waveFormat.Samples.wValidBitsPerSample = AUDIO_BITS_PER_SAMPLE;
+    if (AUDIO_CHANNELS == 1) {
+        waveFormat.dwChannelMask = SPEAKER_FRONT_CENTER;
+    }
+    else {
+        waveFormat.dwChannelMask = SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT;
+    }
+    waveFormat.SubFormat = SOUNDIO_KSDATAFORMAT_SUBTYPE_PCM;
+    
+    // Initialize audio client
+    hr = audioClient->lpVtbl->Initialize(audioClient, AUDCLNT_SHAREMODE_SHARED,
+                                AUDCLNT_STREAMFLAGS_EVENTCALLBACK|AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM|AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                                AUDIO_BUFFER_DURATION_MS * 10000, // Convert ms to 100ns units
+                                0, (WAVEFORMATEX*)&waveFormat, NULL);
+    if (FAILED(hr)) {
+        printf("Failed to initialize audio client: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Get buffer size
+    hr = audioClient->lpVtbl->GetBufferSize(audioClient, &bufferFrameCount);
+    if (FAILED(hr)) {
+        printf("Failed to get buffer size: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Create event for audio callback
+    audioEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!audioEvent) {
+        printf("Failed to create audio event\n");
+        return false;
+    }
+    
+    // Set event handle
+    hr = audioClient->lpVtbl->SetEventHandle(audioClient, audioEvent);
+    if (FAILED(hr)) {
+        printf("Failed to set event handle: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Get render client
+    hr = audioClient->lpVtbl->GetService(audioClient, &IID_IAudioRenderClient, (void**)&renderClient);
+    if (FAILED(hr)) {
+        printf("Failed to get render client: 0x%08x\n", hr);
+        return false;
+    }
+    
+    // Create audio ring buffer
+    ringBufferSize = SAMPLES_PER_FRAME * 8 * 2; // 8 frames worth of stereo samples
+    audioRingBuffer = (int16_t*)malloc(ringBufferSize * sizeof(int16_t));
+    if (!audioRingBuffer) {
+        printf("Failed to allocate audio ring buffer\n");
+        return false;
+    }
+    memset(audioRingBuffer, 0, ringBufferSize * sizeof(int16_t));
+    
+    InitializeCriticalSection(&audioLock);
+    
+    // Create audio thread
+    audioThread = CreateThread(NULL, 0, audioThreadProc, NULL, 0, NULL);
+    if (!audioThread) {
+        printf("Failed to create audio thread\n");
+        return false;
+    }
+    
+    // Start audio client
+    hr = audioClient->lpVtbl->Start(audioClient);
+    if (FAILED(hr)) {
+        printf("Failed to start audio client: 0x%08x\n", hr);
+        return false;
+    }
+    
+    audioInitialized = true;
+    printf("WASAPI audio initialized successfully\n");
+    return true;
+}
+
+// Cleanup audio
+static void cleanupAudio(void) {
+    quit = true;
+    
+    if (audioEvent) {
+        SetEvent(audioEvent);
+    }
+    
+    if (audioThread) {
+        WaitForSingleObject(audioThread, 5000);
+        CloseHandle(audioThread);
+        audioThread = NULL;
+    }
+    
+    if (audioClient) {
+        audioClient->lpVtbl->Stop(audioClient);
+        audioClient->lpVtbl->Release(audioClient);
+        audioClient = NULL;
+    }
+    
+    if (renderClient) {
+        renderClient->lpVtbl->Release(renderClient);
+        renderClient = NULL;
+    }
+    
+    if (device) {
+        device->lpVtbl->Release(device);
+        device = NULL;
+    }
+    
+    if (deviceEnumerator) {
+        deviceEnumerator->lpVtbl->Release(deviceEnumerator);
+        deviceEnumerator = NULL;
+    }
+    
+    if (audioEvent) {
+        CloseHandle(audioEvent);
+        audioEvent = NULL;
+    }
+    
+    if (audioRingBuffer) {
+        free(audioRingBuffer);
+        audioRingBuffer = NULL;
+    }
+    
+    DeleteCriticalSection(&audioLock);
+    CoUninitialize();
+    audioInitialized = false;
+}
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, int nCmdShow) {
-    // CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    // XAudio2Create(&m_xAudio2, 0, XAUDIO2_USE_DEFAULT_PROCESSOR);
-    // IXAudio2_CreateMasteringVoice(m_xAudio2, &m_masterVoice, XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 0, NULL, NULL, AudioCategory_GameEffects );
-
     const char window_class_name[] = "TinyRetro_GBemu";
     static WNDCLASS window_class = { 0 };
     window_class.lpfnWndProc = WindowProcessMessage;
@@ -103,8 +363,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 
         if (GetOpenFileName(&ofn) == TRUE) {
-            // ROM_path = (char*)malloc(sizeof(szFile));
-            // wcstombs(ROM_path, szFile, sizeof(szFile));
             ROM_path = szFile;
         } else {
             printf("File selection cancelled.\n");
@@ -119,19 +377,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
     m_core->init(m_core);
     mCoreInitConfig(m_core, NULL);
 
-    // struct mCoreOptions opts = {0};
-    // opts.useBios = true;
-    // opts.logLevel = mLOG_WARN | mLOG_ERROR | mLOG_FATAL;
-    // mCoreConfigLoadDefaults(&m_core->config, &opts);
-    // m_core->init(m_core);
-
     m_core->desiredVideoDimensions(m_core, &width, &height);
     m_outputBuffer = (color_t*)malloc(width * height * BYTES_PER_PIXEL);
     m_core->setVideoBuffer(m_core, m_outputBuffer, width);
-    // m_core->setAudioBufferSize(m_core, SAMPLES);
+    
+    // Set up audio buffer size
+    m_core->setAudioBufferSize(m_core, SAMPLES_PER_FRAME);
+    
+    // Initialize WASAPI audio
+    if (!initializeAudio()) {
+        printf("Failed to initialize audio\n");
+    }
 
     mCoreLoadFile(m_core, ROM_path);
-
     m_core->reset(m_core);
 
     m_thread.core = m_core;
@@ -157,9 +415,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
     mInputBindKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_RIGHT, GBA_KEY_RIGHT);
 
     double dt = 0;
-
     FILETIME ft;
-
     GetSystemTimeAsFileTime(&ft);
     LONGLONG prev_time = (LONGLONG)ft.dwLowDateTime + ((LONGLONG)(ft.dwHighDateTime) << 32LL);
 
@@ -172,54 +428,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         static MSG message = { 0 };
         while(PeekMessage(&message, NULL, 0, 0, PM_REMOVE)) { DispatchMessage(&message); }
 
-        // // process xinput
-        // ZeroMemory(&controllerState, sizeof(XINPUT_STATE));
-        //
-        // // Get the state of the controller.
-        // DWORD result = XInputGetState(0, &controllerState);
-        //
-        // // Store whether the controller is currently connected or not.
-        // if(result == ERROR_SUCCESS) {
-        //     controllerActive = true;
-        // } else {
-        //     controllerActive = false;
-        // }
-        //
-        // if (controllerActive) {
-        //     bool buttonZ = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_A;
-        //     bool buttonX = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_B;
-        //     bool buttonDUP = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP;
-        //     bool buttonDDOWN = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
-        //     bool buttonDLEFT = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
-        //     bool buttonDRIGHT = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
-        //     bool buttonSelect = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_BACK;
-        //     bool buttonStart = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_START;
-        //
-        //     int thumbLeftX = (int)controllerState.Gamepad.sThumbLX;
-        //     int thumbLeftY = (int)controllerState.Gamepad.sThumbLY;
-        //     int magnitude = (int)sqrt((thumbLeftX * thumbLeftX) + (thumbLeftY * thumbLeftY));
-        //     if(magnitude < XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) {
-        //         thumbLeftX = 0;
-        //         thumbLeftY = 0;
-        //     }
-        //     if (thumbLeftX < -1000) buttonDLEFT = true;
-        //     if (thumbLeftX >  1000) buttonDRIGHT = true;
-        //     if (thumbLeftY >  1000) buttonDUP = true;
-        //     if (thumbLeftY < -1000) buttonDDOWN = true;
-        //
-        //     controller1 = 0xff;
-        //     if (buttonZ)      controller1 &= ~0b00000001;
-        //     if (buttonX)      controller1 &= ~0b00000010;
-        //     if (buttonSelect) controller1 &= ~0b00000100;
-        //     if (buttonStart)  controller1 &= ~0b00001000;
-        //     if (buttonDRIGHT) controller1 &= ~0b00010000;
-        //     if (buttonDLEFT)  controller1 &= ~0b00100000;
-        //     if (buttonDUP)    controller1 &= ~0b01000000;
-        //     if (buttonDDOWN)  controller1 &= ~0b10000000;
-        // }
-
         // mgba step
         m_core->runFrame(m_core);
+        
+        // Process audio for WASAPI output
+        if (audioInitialized) {
+            // Create a temporary buffer for audio data
+            int16_t mgbaAudioSamples[SAMPLES_PER_FRAME * 2] = {0}; // Stereo buffer
+            
+            // For now, generate a test tone to verify WASAPI is working
+            // TODO: Replace this with real mGBA audio data extraction
+            static double phase = 0.0;
+            static bool generateTone = true; // Set to false for silence, true for test tone
+            
+            if (generateTone) {
+                // Generate a 440Hz test tone (A4 note)
+                const double frequency = 440.0;
+                const double amplitude = 2000.0; // Moderate volume
+                const double sample_rate = AUDIO_SAMPLE_RATE;
+                
+                for (size_t i = 0; i < SAMPLES_PER_FRAME; i++) {
+                    int16_t sample = (int16_t)(amplitude * sin(phase));
+                    mgbaAudioSamples[i * 2] = sample;     // Left channel
+                    mgbaAudioSamples[i * 2 + 1] = sample; // Right channel
+                    
+                    phase += 2.0 * 3.14159265359 * frequency / sample_rate;
+                    if (phase > 2.0 * 3.14159265359) {
+                        phase -= 2.0 * 3.14159265359;
+                    }
+                }
+            }
+            // If generateTone is false, mgbaAudioSamples remains zeros (silence)
+            
+            processAudioSamples(mgbaAudioSamples, SAMPLES_PER_FRAME);
+        }
 
         // display video
         for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) {
@@ -231,65 +473,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
             frame.pixels[i] = (r << 16U) | (g << 8U) | b;
         }
 
-        // // render audio
-        // static bool start_audio = false;
-        //
-        // if (!start_audio) {
-        //     WAVEFORMATEX waveFormat;
-        //     ZeroMemory(&waveFormat, sizeof(waveFormat));
-        //
-        //     // Set the wave format for the buffer.
-        //     waveFormat.wFormatTag = WAVE_FORMAT_PCM;
-        //     waveFormat.nSamplesPerSec = 32768;
-        //     waveFormat.wBitsPerSample = 16;
-        //     waveFormat.nChannels = 2;
-        //     waveFormat.nBlockAlign = (waveFormat.wBitsPerSample / 8) * waveFormat.nChannels;
-        //     waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
-        //     waveFormat.cbSize = 0;
-        //
-        //     m_audioBuffer.AudioBytes = AUDIO_SAMPLES_TOTAL * sizeof(uint16_t) * AUDIO_LATENCY;
-        //     m_audioBuffer.pAudioData = (BYTE*)tmp_apu_buffer;
-        //
-        //     HRESULT result = IXAudio2_CreateSourceVoice(m_xAudio2, &m_sourceVoice, &waveFormat, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
-        //     if (FAILED(result)) {}
-        //     else {
-        //         IXAudio2SourceVoice_SubmitSourceBuffer(m_sourceVoice, &m_audioBuffer, NULL);
-        //         IXAudio2SourceVoice_SetVolume(m_sourceVoice, 1.0f, 0);
-        //         IXAudio2SourceVoice_SetFrequencyRatio(m_sourceVoice, 1.0f, 0);
-        //         IXAudio2SourceVoice_Start(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
-        //     }
-        //
-        //     start_audio = true;
-        // }
-        //
-        // // Fill in the audio buffer struct.
-        // minigb_apu_audio_callback(&apu, tmp_apu_buffer + tmp_audio_pos * AUDIO_SAMPLES_TOTAL);
-        // tmp_audio_pos++;
-        //
-        // if (tmp_audio_pos == AUDIO_LATENCY) {
-        //     IXAudio2SourceVoice_Stop(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
-        //     IXAudio2SourceVoice_SubmitSourceBuffer(m_sourceVoice, &m_audioBuffer, NULL);
-        //     IXAudio2SourceVoice_Start(m_sourceVoice, 0, XAUDIO2_COMMIT_NOW);
-        //     tmp_audio_pos = 0;
-        // }
-
         InvalidateRect(window_handle, NULL, FALSE);
         UpdateWindow(window_handle);
 
         double time_to_16ms = (1.0 / 60) - dt;
         if (time_to_16ms > 0)
-            Sleep((int)(time_to_16ms * 1000));// NOLINT magic numbers
+            Sleep((int)(time_to_16ms * 1000));
     }
 
+    // Cleanup
+    cleanupAudio();
+    
     mInputMapDeinit(&m_inputMap);
     mCoreConfigDeinit(&m_core->config);
     m_core->deinit(m_core);
     free(m_outputBuffer);
-
-    // if (m_sourceVoice) IXAudio2Voice_DestroyVoice(m_sourceVoice);
-    // IXAudio2Voice_DestroyVoice(m_masterVoice);
-    // IXAudio2_Release(m_xAudio2);
-    // CoUninitialize();
 
     return 0;
 }
