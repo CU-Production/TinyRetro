@@ -460,6 +460,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
         static MSG message = { 0 };
         while(PeekMessage(&message, NULL, 0, 0, PM_REMOVE)) { DispatchMessage(&message); }
 
+        // process xinput
+        ZeroMemory(&controllerState, sizeof(XINPUT_STATE));
+
+        // Get the state of the controller.
+        DWORD result = XInputGetState(0, &controllerState);
+
+        // Store whether the controller is currently connected or not.
+        if(result == ERROR_SUCCESS) {
+            controllerActive = true;
+        } else {
+            controllerActive = false;
+        }
+
+        if (controllerActive) {
+            bool buttonZ = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_A;
+            bool buttonX = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_B;
+            bool buttonA = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
+            bool buttonS = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
+            bool buttonDUP = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP;
+            bool buttonDDOWN = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
+            bool buttonDLEFT = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
+            bool buttonDRIGHT = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
+            bool buttonSelect = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_BACK;
+            bool buttonStart = controllerState.Gamepad.wButtons & XINPUT_GAMEPAD_START;
+
+            int thumbLeftX = (int)controllerState.Gamepad.sThumbLX;
+            int thumbLeftY = (int)controllerState.Gamepad.sThumbLY;
+            int magnitude = (int)sqrt((thumbLeftX * thumbLeftX) + (thumbLeftY * thumbLeftY));
+            if(magnitude < XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) {
+                thumbLeftX = 0;
+                thumbLeftY = 0;
+            }
+            if (thumbLeftX < -1000) buttonDLEFT = true;
+            if (thumbLeftX >  1000) buttonDRIGHT = true;
+            if (thumbLeftY >  1000) buttonDUP = true;
+            if (thumbLeftY < -1000) buttonDDOWN = true;
+
+            int key;
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, 'Z');       if (buttonZ)      {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, 'X');       if (buttonX)      {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, 'A');       if (buttonA)      {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, 'S');       if (buttonS)      {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_BACK);   if (buttonSelect) {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_RETURN); if (buttonStart)  {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_RIGHT);  if (buttonDRIGHT) {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_LEFT);   if (buttonDLEFT)  {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_UP);     if (buttonDUP)    {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+            key = mInputMapKey(&m_inputMap, TINYGBA_BINDING_KEY, VK_DOWN);   if (buttonDDOWN)  {m_core->addKeys(m_core, 1 << key); } else { m_core->clearKeys(m_core, 1 << key); }
+        }
+
         // Run mGBA core directly
         m_core->runFrame(m_core);
         
