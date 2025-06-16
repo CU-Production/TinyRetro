@@ -429,7 +429,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLine, 
     // Don't use mCoreThread for now - use direct calls to avoid conflicts
     // This is simpler and more stable for our WASAPI integration
 
-    struct mInputPlatformInfo MyGBAInputInfo = {};
+    struct mInputPlatformInfo MyGBAInputInfo = {0};
     MyGBAInputInfo.platformName = "gba";
     MyGBAInputInfo.nKeys = GBA_KEY_MAX;
     MyGBAInputInfo.hat.up = GBA_KEY_UP;
