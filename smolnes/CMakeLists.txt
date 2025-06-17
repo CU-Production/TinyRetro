@@ -1,0 +1,1 @@
+add_executable(smolnes WIN32 smolnes-deobfuscated-win.c)
